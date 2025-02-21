@@ -19,7 +19,7 @@ rust-version = "1.85.0"
 license = "MIT"
 
 [dependencies]
-serde_arrays = { version = "0.1.0" }
 serde = { version = "^1", features = ["derive"] }
+ciborium = { version = "^0.2" }
 
 [dev-dependencies]

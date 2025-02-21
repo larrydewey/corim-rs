@@ -25,10 +25,14 @@ pub mod cotl;
 /// Triple types used in CoMID tags
 pub mod triples;
 
+/// Fixed Bytes Arrays
+pub mod fixed_bytes;
+
 // Re-export all public items from each module
 use comid::*;
 use core::*;
 use corim::*;
 use coswid::*;
 use cotl::*;
+use fixed_bytes::*;
 use triples::*;

@@ -40,6 +40,7 @@
 //! };
 //! ```
 
+use ciborium::tag::Accepted;
 use serde::{Deserialize, Serialize};
 
 use crate::{ExtensionMap, OneOrMore, TagIdentityMap, ValidityMap};
@@ -49,9 +50,14 @@ use crate::{ExtensionMap, OneOrMore, TagIdentityMap, ValidityMap};
 /// CoTL tags provide a mechanism to maintain lists of trusted CoMID and CoSWID tags.
 /// They can be used to establish trust relationships and manage tag distribution.
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "507")]
+pub struct ConciceT1Tag {
+    #[serde(flatten)]
+    pub field: Accepted<RawConciseTlTag, 507>,
+}
+
+#[derive(Serialize, Deserialize)]
 #[repr(C)]
-pub struct ConciseTlTag {
+struct RawConciseTlTag {
     /// Identity information for this trust list tag
     #[serde(rename = "tag-identity")]
     pub tag_identity: TagIdentityMap,

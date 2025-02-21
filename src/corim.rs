@@ -48,6 +48,7 @@ use crate::{
     OneOrMore, Role, Text, Time, Tstr, Uri, UuidType,
 };
 
+use ciborium::tag::Accepted;
 use serde::{Deserialize, Serialize};
 
 /// Represents a Concise Reference Integrity Manifest (CoRIM)
@@ -63,10 +64,16 @@ pub enum ConciseRimTypeChoice {
     Signed(COSESign1Corim),
 }
 
+#[repr(C)]
+#[derive(Serialize, Deserialize)]
+pub struct TaggedCorimMap {
+    #[serde(flatten)]
+    pub field: Accepted<CorimMap, 501>,
+}
+
 /// CoRIM structure tagged with CBOR tag 501 containing the main manifest content
 #[repr(C)]
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "501")]
 pub struct CorimMap {
     /// Unique identifier for the CoRIM
     pub id: CorimIdTypeChoice,
@@ -171,11 +178,16 @@ pub struct CorimMapExtension {
     pub bytes: Bytes,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct COSESign1Corim {
+    #[serde(flatten)]
+    pub field: Accepted<RawCOSESign1Corim, 18>,
+}
+
 /// COSE_Sign1 structure for a signed CoRIM with CBOR tag 18
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "18")]
 #[repr(C)]
-pub struct COSESign1Corim {
+pub struct RawCOSESign1Corim {
     /// Protected header containing signing metadata
     pub protected: ProtectedCorimHeaderMap,
     /// Optional unprotected header attributes

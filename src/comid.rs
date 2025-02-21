@@ -47,16 +47,23 @@ use crate::{
     DomainMembershipTripleRecord, EndorsedTripleRecord, ExtensionMap, IdentityTripleRecord,
     OneOrMore, ReferenceTripleRecord, Text, Tstr, Uint, Uri, UuidType,
 };
+use ciborium::tag::Accepted;
 use serde::{Deserialize, Serialize};
 
 /// A tag version number represented as an unsigned integer
 pub type TagVersionType = Uint;
 
+/// A Concise Module Identifier (CoMID) structured tag
+#[derive(Serialize, Deserialize)]
+pub struct ConciseMidTag {
+    #[serde(flatten)]
+    pub tag: Accepted<RawConciseMidTag, 506>,
+}
+
 /// A Concise Module Identifier (CoMID) tag structure tagged with CBOR tag 506
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "506")]
 #[repr(C)]
-pub struct ConciseMidTag {
+pub struct RawConciseMidTag {
     /// Optional language identifier for the tag content
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<Text>,

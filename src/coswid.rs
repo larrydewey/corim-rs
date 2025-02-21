@@ -55,13 +55,19 @@ use crate::{
     AnyUri, ExtensionMap, GlobalAttributes, HashEntry, Int, Integer, IntegerTime, Label, OneOrMore,
     Role, Text, TextOrBytes, TextOrBytesSized, Uint, Uri, VersionScheme,
 };
+use ciborium::tag::Accepted;
 use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+pub struct ConciseSwidTag {
+    #[serde(flatten)]
+    pub field: Accepted<RawConciseSwidTag, 505>,
+}
 
 /// A Concise Software Identity (CoSWID) tag structure tagged with CBOR tag 505
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "505")]
 #[repr(C)]
-pub struct ConciseSwidTag {
+pub struct RawConciseSwidTag {
     /// Unique identifier for the tag
     #[serde(rename = "tag-id")]
     pub tag_id: TextOrBytes,
