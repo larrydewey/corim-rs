@@ -119,7 +119,9 @@ generate_tagged!(
 
 /// The main CoRIM manifest structure containing all reference integrity data
 /// and associated metadata. Tagged with CBOR tag 501.#[repr(C)]
-#[derive(Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord, Clone,
+)]
 pub struct CorimMap<'a> {
     /// Unique identifier for the CoRIM
     pub id: CorimIdTypeChoice<'a>,
@@ -146,7 +148,7 @@ pub struct CorimMap<'a> {
 
 /// Represents either a string or UUID identifier for a CoRIM
 #[repr(C)]
-#[derive(Debug, Serialize, Deserialize, From, TryFrom, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Serialize, Deserialize, From, TryFrom, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum CorimIdTypeChoice<'a> {
     /// Text string identifier
     Tstr(Tstr<'a>),
@@ -162,7 +164,7 @@ impl<'a> From<&'a str> for CorimIdTypeChoice<'a> {
 
 /// Types of tags that can be included in a CoRIM
 #[repr(C)]
-#[derive(Debug, Serialize, Deserialize, From, TryFrom, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Serialize, Deserialize, From, TryFrom, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum ConciseTagTypeChoice<'a> {
     /// A Concise Software Identity (CoSWID) tag
     Swid(TaggedConciseSwidTag<'a>),
@@ -237,7 +239,9 @@ impl<'a> From<ConciseTlTag<'a>> for ConciseTagTypeChoice<'a> {
 
 /// Location and optional thumbprint of a dependent CoRIM
 #[repr(C)]
-#[derive(Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord, Clone,
+)]
 pub struct CorimLocatorMap<'a> {
     /// URI(s) where the dependent CoRIM can be found
     pub href: OneOrMany<Uri<'a>>,
@@ -248,7 +252,7 @@ pub struct CorimLocatorMap<'a> {
 
 /// Profile identifier that can be either a URI or OID
 #[repr(C)]
-#[derive(Debug, Serialize, Deserialize, From, TryFrom, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Serialize, Deserialize, From, TryFrom, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum ProfileTypeChoice<'a> {
     /// URI-based profile identifier
     Uri(Uri<'a>),
@@ -259,7 +263,7 @@ pub enum ProfileTypeChoice<'a> {
 /// Defines the validity period for a CoRIM or signature
 #[repr(C)]
 #[derive(
-    Default, Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord,
+    Default, Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord, Clone,
 )]
 pub struct ValidityMap {
     /// Optional start time of the validity period
@@ -272,7 +276,9 @@ pub struct ValidityMap {
 
 /// Information about an entity associated with the CoRIM
 #[repr(C)]
-#[derive(Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord, Clone,
+)]
 pub struct CorimEntityMap<'a> {
     /// Name of the entity
     #[serde(rename = "entity-name")]
@@ -287,7 +293,7 @@ pub struct CorimEntityMap<'a> {
 }
 
 /// Roles that entities can have in relation to a CoRIM manifest
-#[derive(Debug, Serialize, Deserialize, From, TryFrom, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Serialize, Deserialize, From, TryFrom, PartialEq, Eq, PartialOrd, Ord, Clone)]
 #[repr(u8)]
 pub enum CorimRoleTypeChoice {
     /// Entity that created the manifest content
@@ -299,7 +305,9 @@ pub enum CorimRoleTypeChoice {
 
 /// Extension map for CoRIM-specific extensions
 #[repr(C)]
-#[derive(Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord, Clone,
+)]
 pub struct CorimMapExtension {
     /// Raw bytes containing the extension data
     #[serde(flatten)]
@@ -307,7 +315,9 @@ pub struct CorimMapExtension {
 }
 
 /// COSE_Sign1 structure for a signed CoRIM with CBOR tag 18
-#[derive(Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord, Clone,
+)]
 #[repr(C)]
 pub struct COSESign1Corim<'a> {
     /// Protected header containing signing metadata (must be integrity protected)
@@ -322,7 +332,7 @@ pub struct COSESign1Corim<'a> {
 
 /// Protected header for a signed CoRIM
 #[derive(
-    Default, Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord,
+    Default, Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord, Clone,
 )]
 #[repr(C)]
 pub struct ProtectedCorimHeaderMap<'a> {
@@ -344,7 +354,7 @@ pub struct ProtectedCorimHeaderMap<'a> {
 
 /// Metadata about the CoRIM signing operation
 #[derive(
-    Default, Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord,
+    Default, Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord, Clone,
 )]
 #[repr(C)]
 pub struct CorimMetaMap<'a> {
@@ -357,7 +367,7 @@ pub struct CorimMetaMap<'a> {
 
 /// Information about the entity that signed the CoRIM
 #[derive(
-    Default, Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord,
+    Default, Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord, Clone,
 )]
 #[repr(C)]
 pub struct CorimSignerMap<'a> {
