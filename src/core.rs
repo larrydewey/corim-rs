@@ -44,10 +44,10 @@ use std::{
 };
 
 use base64::{self, engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use derive_more::{Constructor, From, TryFrom};
+use derive_more::{Constructor, From, TryFrom, AsRef, AsMut, Deref, DerefMut};
 use serde::{
     de::{self, SeqAccess, Visitor},
-    ser::SerializeSeq,
+    ser::{Error as _, SerializeSeq},
     Deserialize, Deserializer, Serialize, Serializer,
 };
 
@@ -324,9 +324,7 @@ impl<'a> ExtensionMap<'a> {
 }
 
 /// UUID type representing a 16-byte unique identifier
-#[derive(
-    Default, Debug, Serialize, Deserialize, From, Constructor, PartialEq, Eq, PartialOrd, Ord, Clone,
-)]
+#[derive(Default, Debug, From, Constructor, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub struct UuidType(pub FixedBytes<16>);
 
 impl TryFrom<&[u8]> for UuidType {
@@ -334,6 +332,32 @@ impl TryFrom<&[u8]> for UuidType {
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         Ok(Self(FixedBytes(value.try_into()?)))
+    }
+}
+
+impl TryFrom<&str> for UuidType {
+    type Error = uuid::Error;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Ok(UuidType::from(FixedBytes::from(
+            *uuid::Uuid::parse_str(value)?.as_bytes(),
+        )))
+    }
+}
+
+impl TryFrom<String> for UuidType {
+    type Error = uuid::Error;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Ok(UuidType::from(FixedBytes::from(
+            *uuid::Uuid::parse_str(&value)?.as_bytes(),
+        )))
+    }
+}
+
+impl ToString for UuidType {
+    fn to_string(&self) -> String {
+        uuid::Uuid::from_bytes(self.0 .0).to_string()
     }
 }
 
@@ -374,6 +398,34 @@ impl Index<usize> for UuidType {
 impl IndexMut<usize> for UuidType {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.0 .0[index]
+    }
+}
+
+impl Serialize for UuidType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&self.to_string())
+        } else {
+            serializer.serialize_bytes(&self.0 .0)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for UuidType {
+    fn deserialize<D>(deserializer: D) -> Result<UuidType, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            String::deserialize(deserializer)?
+                .try_into()
+                .map_err(de::Error::custom)
+        } else {
+            Ok(UuidType::from(FixedBytes::<16>::deserialize(deserializer)?))
+        }
     }
 }
 
@@ -431,11 +483,83 @@ impl IndexMut<usize> for UeidType {
     }
 }
 
+// ObjectIdentifier is an identifier mechanism defined by [ITU
+// X.660](https://www.itu.int/rec/T-REC-X.660-201107-I/en) for naming objects in a
+// globally-unambiguous way. It is a sequence of integer nodes (textually represented as
+// dot-delimited integers) representing a path through the OID tree. Each node in the tree is
+// controlled by an assigning authority.
+#[derive(Debug, PartialEq, Eq, Clone, PartialOrd, Ord, AsRef, AsMut, Deref, DerefMut)]
+pub struct ObjectIdentifier(Bytes);
+
+impl TryFrom<&str> for ObjectIdentifier {
+    type Error = oid::ObjectIdentifierError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        let bytes: Vec<u8> = oid::ObjectIdentifier::try_from(value)?.into();
+        Ok(Self(bytes.into()))
+    }
+}
+
+impl TryFrom<&[u8]> for ObjectIdentifier {
+    type Error = oid::ObjectIdentifierError;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let bytes: Vec<u8> = oid::ObjectIdentifier::try_from(value)?.into();
+        Ok(Self(bytes.into()))
+    }
+}
+
+impl TryFrom<Vec<u8>> for ObjectIdentifier {
+    type Error = oid::ObjectIdentifierError;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        let bytes: Vec<u8> = oid::ObjectIdentifier::try_from(value)?.into();
+        Ok(Self(bytes.into()))
+    }
+}
+
+impl AsRef<[u8]> for ObjectIdentifier {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl AsMut<[u8]> for ObjectIdentifier {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+impl Serialize for ObjectIdentifier {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            let obj = oid::ObjectIdentifier::try_from(self.0.as_ref())
+                .map_err(|e| S::Error::custom(format!("invalid OID: {:?}", e)))?;
+            serializer.serialize_str(&Into::<String>::into(obj))
+        } else {
+            serializer.serialize_bytes(&self.0)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ObjectIdentifier {
+    fn deserialize<D>(deserializer: D) -> Result<ObjectIdentifier, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = oid::ObjectIdentifier::deserialize(deserializer)?.into();
+        Ok(Self(bytes.into()))
+    }
+}
+
 generate_tagged!(
     (1, IntegerTime, Int, "A representation of time in integer format using CBOR tag 1"),
     (32, Uri, Text<'a>, 'a,  "A URI text string with CBOR tag 32"),
     (37, TaggedUuidType, UuidType, "UUID type wrapped with CBOR tag 37"),
-    (111, OidType, Bytes, "An Object Identifier (OID) represented as bytes using CBOR tag 111"),
+    (111, OidType, ObjectIdentifier, "An Object Identifier (OID) represented as bytes using CBOR tag 111"),
     (550, TaggedUeidType, UeidType, "UEID type wrapped with CBOR tag 550"),
     (552, SvnType, Uint, "A Security Version Number (SVN) using CBOR tag 552"),
     (553, MinSvnType, Uint, "A minimum Security Version Number (SVN) using CBOR tag 553"),
@@ -2009,6 +2133,44 @@ mod tests {
         }
     }
 
+    mod uuid {
+        use super::super::*;
+
+        // note: CBOR is tested as part of TaggedUuidType below.
+
+        #[test]
+        fn test_uuid_type_json_serialize() {
+            let uuid_bytes: [u8; 16] = [
+                0x55, 0x0E, 0x84, 0x00, 0xE2, 0x9B, 0x41, 0xD4, 0xA7, 0x16, 0x44, 0x66, 0x55, 0x44,
+                0x00, 0x00,
+            ];
+
+            let expected = "\"550e8400-e29b-41d4-a716-446655440000\"";
+
+            let uuid = UuidType::from(FixedBytes::from(uuid_bytes));
+
+            let actual = serde_json::to_string(&uuid).unwrap();
+
+            assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn test_uuid_type_json_deserialize() {
+            let uuid_bytes: [u8; 16] = [
+                0x55, 0x0E, 0x84, 0x00, 0xE2, 0x9B, 0x41, 0xD4, 0xA7, 0x16, 0x44, 0x66, 0x55, 0x44,
+                0x00, 0x00,
+            ];
+
+            let expected = UuidType::from(FixedBytes::from(uuid_bytes));
+
+            let json = "\"550e8400-e29b-41d4-a716-446655440000\"";
+
+            let actual: UuidType = serde_json::from_str(json).unwrap();
+
+            assert_eq!(actual, expected);
+        }
+    }
+
     mod generated_tags {
         use super::*;
         #[test]
@@ -2152,7 +2314,7 @@ mod tests {
         fn test_oid_type_serialize_deserialize() {
             // Test OID bytes for 2.5.4.3 (Common Name)
             let oid_bytes = [0x55, 0x04, 0x03]; // OID 2.5.4.3 (Common Name)
-            let expected = OidType::from(Bytes::from(oid_bytes.as_slice()));
+            let expected = OidType::from(ObjectIdentifier::try_from(oid_bytes.as_slice()).unwrap());
 
             // Expected CBOR bytes: Tag 111 (D86F) + Byte string (3 bytes)
             let expected_bytes = [
@@ -2171,7 +2333,24 @@ mod tests {
             assert_eq!(expected, actual, "Deserialization mismatch");
 
             // Verify inner value
-            assert_eq!(*actual.as_ref(), oid_bytes, "Inner OID bytes mismatch");
+            assert_eq!(
+                actual.as_ref().as_ref(),
+                oid_bytes,
+                "Inner OID bytes mismatch"
+            );
+        }
+
+        #[test]
+        fn test_objectidentifier_serde_json() {
+            let oid_bytes = [0x55, 0x04, 0x03]; // OID 2.5.4.3 (Common Name)
+            let oid_json = "\"2.5.4.3\"";
+            let expected = ObjectIdentifier::try_from(oid_bytes.as_slice()).unwrap();
+
+            let actual: ObjectIdentifier = serde_json::from_str(oid_json).unwrap();
+            assert_eq!(actual, expected);
+
+            let text = serde_json::to_string(&actual).unwrap();
+            assert_eq!(text, oid_json);
         }
 
         #[test]
