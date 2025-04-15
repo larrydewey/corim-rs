@@ -573,11 +573,11 @@ pub enum CryptoKeyTypeChoice<'a> {
     /// COSE key structure
     CoseKey(CoseKeyType<'a>),
     /// Generic cryptographic thumbprint
-    Thumbprint(ThumbprintType<'a>),
+    Thumbprint(ThumbprintType),
     /// Certificate thumbprint
-    CertThumbprint(CertThumprintType<'a>),
+    CertThumbprint(CertThumprintType),
     /// Certificate path thumbprint
-    CertPathThumbprint(CertPathThumbprintType<'a>),
+    CertPathThumbprint(CertPathThumbprintType),
     /// ASN.1 DER encoded PKIX certificate
     PkixAsn1DerCert(PkixAsn1DerCertType),
     /// Raw bytes
@@ -1060,7 +1060,7 @@ impl SvnTypeChoice {
 }
 
 /// Collection of one or more cryptographic digests
-pub type DigestsType<'a> = Vec<Digest<'a>>;
+pub type DigestsType<'a> = Vec<Digest>;
 
 /// Status flags indicating various security and configuration states
 #[derive(Default, Debug, Serialize, Deserialize, From, PartialEq, Eq, PartialOrd, Ord, Clone)]
