@@ -97,10 +97,10 @@ use std::{
 
 use crate::{
     core::PkixBase64CertPathType, empty_map_as_none, Bytes, CertPathThumbprintType,
-    CertThumprintType, ConciseSwidTagId, CoseKeyType, Digest, ExtensionMap, MinSvnType, OidType,
-    OneOrMore, PkixAsn1DerCertType, PkixBase64CertType, PkixBase64KeyType, RawValueType, Result,
-    SvnType, TaggedBytes, TaggedUuidType, Text, ThumbprintType, TriplesError, Tstr, UeidType, Uint,
-    Ulabel, UuidType, VersionScheme,
+    CertThumprintType, ConciseSwidTagId, CoseKeyType, Digest, ExtensionMap, MinSvnType,
+    ObjectIdentifier, OidType, OneOrMore, PkixAsn1DerCertType, PkixBase64CertType,
+    PkixBase64KeyType, RawValueType, Result, SvnType, TaggedBytes, TaggedUuidType, Text,
+    ThumbprintType, TriplesError, Tstr, UeidType, Uint, Ulabel, UuidType, VersionScheme,
 };
 use derive_more::{Constructor, From, TryFrom};
 use serde::{
@@ -424,7 +424,7 @@ impl<'a> ClassMapBuilder<'a> {
 }
 
 /// Possible types for class identifiers
-#[derive(Debug, Serialize, Deserialize, From, TryFrom, PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Debug, Serialize, From, TryFrom, PartialEq, Eq, PartialOrd, Ord, Clone)]
 #[repr(C)]
 #[serde(untagged)]
 pub enum ClassIdTypeChoice {
@@ -555,6 +555,81 @@ impl ClassIdTypeChoice {
         match self {
             Self::Bytes(_) => Some(Self::as_bytes(self)),
             _ => None,
+        }
+    }
+}
+
+
+#[derive(Deserialize)]
+struct TaggedJsonValue<'a> {
+    #[serde(rename = "type")]
+    typ: &'a str,
+    #[serde(borrow)]
+    value: &'a serde_json::value::RawValue
+}
+
+impl<'de> Deserialize<'de> for ClassIdTypeChoice {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            let tagged_value =  TaggedJsonValue::deserialize(deserializer)?;
+
+            match tagged_value.typ {
+                "oid" => {
+                    let oid: ObjectIdentifier = serde_json::from_str(tagged_value.value.get())
+                        .map_err(de::Error::custom)?;
+                    Ok(ClassIdTypeChoice::Oid(OidType::from(oid)))
+                },
+                "uuid" => {
+                    let uuid: UuidType = serde_json::from_str(tagged_value.value.get())
+                        .map_err(de::Error::custom)?;
+                    Ok(ClassIdTypeChoice::Uuid(TaggedUuidType::from(uuid)))
+                },
+                "bytes" => {
+                    let bytes: Bytes = serde_json::from_str(tagged_value.value.get())
+                        .map_err(de::Error::custom)?;
+                    Ok(ClassIdTypeChoice::Bytes(TaggedBytes::from(bytes)))
+                }
+                s => {
+                    Err(de::Error::custom(format!("unexpected ClassIdTypeChoice type \"{s}\"")))
+                }
+            }
+        } else {
+            match ciborium::Value::deserialize(deserializer)? {
+                ciborium::Value::Tag(tag,inner) => {
+                    // Re-serializing the inner Value so that we can deserialize it
+                    // into an appropriate type, once we figure out what that is
+                    // based on the tag.
+                    let mut buf: Vec<u8> = Vec::new();
+                    ciborium::into_writer(&inner, &mut buf).unwrap();
+
+                    match tag {
+                        111 => {
+                            let oid: ObjectIdentifier = ciborium::from_reader(buf.as_slice())
+                                .map_err(de::Error::custom)?;
+                            Ok(ClassIdTypeChoice::Oid(OidType::from(oid)))
+                        },
+                        37 => {
+                            let uuid: UuidType = ciborium::from_reader(buf.as_slice())
+                                .map_err(de::Error::custom)?;
+                            Ok(ClassIdTypeChoice::Uuid(TaggedUuidType::from(uuid)))
+                        },
+                        560 => {
+                            let bytes: Bytes = ciborium::from_reader(buf.as_slice())
+                                .map_err(de::Error::custom)?;
+                            Ok(ClassIdTypeChoice::Bytes(TaggedBytes::from(bytes)))
+                        }
+                        n => {
+                            Err(de::Error::custom(format!("unexpected ClassIdTypeChoice tag {n}")))
+                        }
+                    }
+                },
+                _ => {
+                    Err(de::Error::custom("did not see a tag"))
+                }
+            }
         }
     }
 }
@@ -2268,8 +2343,30 @@ mod test {
 
         assert_eq!(
             err.to_string(),
-            "data did not match any variant of untagged enum ClassIdTypeChoice".to_string()
+            "unexpected ClassIdTypeChoice type \"foo\"".to_string()
         );
+    }
+
+    #[test]
+    fn test_class_id_cbor_serde() {
+        let class_id_oid = ClassIdTypeChoice::Oid(OidType::from(
+            ObjectIdentifier::try_from("1.2.3.4").unwrap(),
+        ));
+
+        let mut actual: Vec<u8> = Vec::new();
+        ciborium::into_writer(&class_id_oid, &mut actual).unwrap();
+
+        let expected: Vec<u8> = vec![
+            0xd8, 0x6f, // tag 111
+              0x43, // bstr(3)
+                0x2a, 0x03, 0x04, // OID bytes
+        ];
+
+        assert_eq!(actual, expected);
+
+        let class_id_oid_de: ClassIdTypeChoice = ciborium::from_reader(expected.as_slice()).unwrap();
+
+        assert_eq!(class_id_oid_de, class_id_oid);
     }
 
     #[test]
