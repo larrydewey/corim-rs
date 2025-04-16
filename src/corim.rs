@@ -89,6 +89,7 @@ use crate::{
 use derive_more::{Constructor, From, TryFrom};
 use serde::{
     de::{self, Visitor},
+    ser::SerializeMap,
     Deserialize, Deserializer, Serialize, Serializer,
 };
 /// Represents a Concise Reference Integrity Manifest (CoRIM)
@@ -186,6 +187,7 @@ generate_tagged!(
         TaggedUnsignedCorimMap,
         CorimMap<'a>,
         'a,
+        "unsigned-corim",
         "A CBOR tagged, unsigned CoRIM Map."
     ),
     (
@@ -193,6 +195,7 @@ generate_tagged!(
         TaggedCOSESign1Corim,
         COSESign1Corim<'a>,
         'a,
+        "signed-corim",
         "A CBOR tagged, signed CoRIM."
     )
 );
@@ -422,7 +425,7 @@ pub struct CorimLocatorMap<'a> {
     /// Optional cryptographic thumbprint for verification
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "1")]
-    pub thumbprint: Option<Digest<'a>>,
+    pub thumbprint: Option<Digest>,
 }
 
 /// Profile identifier that can be either a URI or OID
