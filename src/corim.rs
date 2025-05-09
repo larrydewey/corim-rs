@@ -79,7 +79,7 @@ use std::{collections::BTreeMap, fmt};
 
 use crate::{
     comid::ConciseMidTag,
-    core::{Bytes, Label},
+    core::{Bytes, Label, ObjectIdentifier, TaggedJsonValue},
     coswid::ConciseSwidTag,
     cotl::ConciseTlTag,
     empty_map_as_none, generate_tagged, Digest, ExtensionMap, Int, OidType, TaggedBytes,
@@ -479,41 +479,52 @@ impl<'de> Deserialize<'de> for ProfileTypeChoice<'_> {
     where
         D: Deserializer<'de>,
     {
-        struct TagVisitor<'a>(std::marker::PhantomData<&'a ()>);
-        impl<'de, 'a> Visitor<'de> for TagVisitor<'a> {
-            type Value = ProfileTypeChoice<'a>;
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter
-                    .write_str("a ProfileTypeChoice variant distinguished by CBOR tag (32, 111)")
-            }
+        if deserializer.is_human_readable() {
+            let tagged_value = TaggedJsonValue::deserialize(deserializer)?;
 
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: de::SeqAccess<'de>,
-            {
-                let tag: u16 = seq
-                    .next_element()?
-                    .ok_or_else(|| de::Error::custom("missing tag"))?;
-
-                match tag {
-                    32 => {
-                        let value: Uri<'a> = seq
-                            .next_element()?
-                            .ok_or_else(|| de::Error::custom("missing tagged value"))?;
-                        Ok(ProfileTypeChoice::Uri(value))
-                    }
-                    111 => {
-                        let value: OidType = seq
-                            .next_element()?
-                            .ok_or_else(|| de::Error::custom("missing tagged value"))?;
-                        Ok(ProfileTypeChoice::OidType(value))
-                    }
-                    _ => Err(de::Error::custom(format!("unsupported CBOR tag: {}", tag))),
+            match tagged_value.typ {
+                "oid" => {
+                    let oid: ObjectIdentifier = serde_json::from_str(tagged_value.value.get())
+                        .map_err(de::Error::custom)?;
+                    Ok(ProfileTypeChoice::OidType(oid.into()))
                 }
+                "uri" => {
+                    let uri: Text = serde_json::from_str(tagged_value.value.get())
+                        .map_err(de::Error::custom)?;
+                    Ok(ProfileTypeChoice::Uri(uri.into()))
+                }
+                s => Err(de::Error::custom(format!(
+                    "unexpected ProfileTypeChoice type \"{s}\""
+                ))),
+            }
+        } else {
+            match ciborium::Value::deserialize(deserializer)? {
+                ciborium::Value::Tag(tag, inner) => {
+                    // Re-serializing the inner Value so that we can deserialize it
+                    // into an appropriate type, once we figure out what that is
+                    // based on the tag.
+                    let mut buf: Vec<u8> = Vec::new();
+                    ciborium::into_writer(&inner, &mut buf).unwrap();
+
+                    match tag {
+                        111 => {
+                            let oid: ObjectIdentifier =
+                                ciborium::from_reader(buf.as_slice()).map_err(de::Error::custom)?;
+                            Ok(ProfileTypeChoice::OidType(oid.into()))
+                        }
+                        37 => {
+                            let uri: Text =
+                                ciborium::from_reader(buf.as_slice()).map_err(de::Error::custom)?;
+                            Ok(ProfileTypeChoice::Uri(uri.into()))
+                        }
+                        n => Err(de::Error::custom(format!(
+                            "unexpected ProfileTypeChoice tag {n}"
+                        ))),
+                    }
+                }
+                _ => Err(de::Error::custom("did not see a tag for ProfileTypeChoice")),
             }
         }
-
-        deserializer.deserialize_any(TagVisitor(std::marker::PhantomData))
     }
 }
 
@@ -785,7 +796,7 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
-    use super::UnsignedCorimMap;
+    use super::*;
 
     #[test]
     /// ```text
@@ -832,7 +843,7 @@ mod tests {
                     0xff, // break
                 0xff, // break
               0xa0, // map(0) -- COSE unprotected header
-              0x58, 0xc8, // bstr(200) -- COSE payload
+              0x58, 0xc5, // bstr(197) -- COSE payload
                 0xd9, 0x01, 0xf5, // tag(501) -- CoRIM
                   0xbf, // map(indef)
                     0x61, // key: tstr(1)
@@ -915,20 +926,18 @@ mod tests {
                                   0xff,
                                 0xff,
                                 0x81, // array(1)
-                                  0xa2, // map(2)
-                                    0x61, // key: tstr(1)
-                                      0x30, // "0"
+                                  0xbf, // map(indef)
+                                    0x00, // key: 0
                                     0x68, // value: str(8)
                                       0x53, 0x6f, 0x6d, 0x65, 0x20, 0x4b, 0x65, 0x79, // "Some Key"
-                                    0x61, // key: tstr(1)
-                                      0x31, // "1"
+                                    0x01, // key: 1
                                     0xbf, // value: map(indef)
-                                      0x62, // key: tstr(2)
-                                        0x31, 0x31, // "11"
+                                      0x0b, // key: 11
                                       0x69, // value: tstr(9)
                                         0x53, 0x6f, 0x6d, 0x65, 0x20, 0x4e, 0x61, 0x6d, // "Some Nam"
                                         0x65,                                           // "e"
                                     0xff, // break
+                                  0xff, // break
                           0xff, // break
                         0xff, // break
                   0xff, // break
@@ -954,7 +963,7 @@ mod tests {
                         name: Some("Some Name".into()),
                         version: None,
                         svn: None,
-                        digest: None,
+                        digests: None,
                         flags: None,
                         raw: None,
                         mac_addr: None,
@@ -1055,5 +1064,38 @@ mod tests {
             .expect("Failed to deserialize COSE_Sign1 CoRIM");
 
         assert_eq!(cose_corim, deserialized);
+    }
+
+    #[test]
+    fn test_profile_type_choice() {
+        let profile = ProfileTypeChoice::OidType(OidType::from(
+            ObjectIdentifier::try_from("1.2.3.4").unwrap(),
+        ));
+
+        let mut actual: Vec<u8> = vec![];
+
+        ciborium::into_writer(&profile, &mut actual).unwrap();
+
+        let expected: Vec<u8> = vec![
+            0xd8, 0x6f, // tag(111)
+              0x43, // bstr(3)
+                0x2a, 0x03, 0x04
+        ];
+
+        assert_eq!(actual, expected);
+
+        let profile_de: ProfileTypeChoice = ciborium::from_reader(expected.as_slice()).unwrap();
+
+        assert_eq!(profile_de, profile);
+
+        let actual = serde_json::to_string(&profile).unwrap();
+
+        let expected = r#"{"type":"oid","value":"1.2.3.4"}"#;
+
+        assert_eq!(actual, expected);
+
+        let profile_de: ProfileTypeChoice = serde_json::from_str(expected).unwrap();
+
+        assert_eq!(profile_de, profile);
     }
 }

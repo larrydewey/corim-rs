@@ -49,7 +49,7 @@ use base64::{self, engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use derive_more::{AsMut, AsRef, Constructor, Deref, DerefMut, From, TryFrom};
 use serde::{
     de::{self, SeqAccess, Unexpected, Visitor},
-    ser::{Error as _, SerializeMap, SerializeSeq},
+    ser::{self, Error as _, SerializeMap, SerializeSeq},
     Deserialize, Deserializer, Serialize, Serializer,
 };
 
@@ -107,6 +107,12 @@ impl TryFrom<String> for Bytes {
         Ok(Self {
             bytes: URL_SAFE_NO_PAD.decode(v)?,
         })
+    }
+}
+
+impl From<&Bytes> for Vec<u8> {
+    fn from(value: &Bytes) -> Self {
+        value.bytes.clone()
     }
 }
 
@@ -180,10 +186,67 @@ impl<'de> Deserialize<'de> for Bytes {
     where
         D: Deserializer<'de>,
     {
+        struct BytesVisitor;
+
+        impl<'de> Visitor<'de> for BytesVisitor {
+            type Value = Bytes;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string or a byte array")
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                v.try_into().map_err(de::Error::custom)
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                v.try_into().map_err(de::Error::custom)
+            }
+
+            fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(v)
+            }
+
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Bytes {
+                    bytes: Vec::from(v),
+                })
+            }
+
+            fn visit_borrowed_bytes<E>(self, v: &'de [u8]) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_bytes(v)
+            }
+
+            fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Bytes { bytes: v })
+            }
+        }
+
         if deserializer.is_human_readable() {
-            Ok(String::deserialize(deserializer)?
-                .try_into()
-                .map_err(de::Error::custom)?)
+            // note(setrofim): when deserializing complex structures, serde may internally use a
+            // number of intermediate deserializers. These do not propagate the
+            // is_human_readable() of the original deserializer and always return true. This means
+            // that we must be prepared to handle bytes as well as strings, even when dealing with
+            // ostensibly human-readable formats.
+            deserializer.deserialize_any(BytesVisitor)
         } else {
             let bytes = Vec::<u8>::deserialize(deserializer)?;
             Ok(Bytes { bytes })
@@ -191,29 +254,56 @@ impl<'de> Deserialize<'de> for Bytes {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Ord, PartialOrd, Eq, PartialEq, Clone, Default)]
+pub struct ExtensionMap<'a>(pub BTreeMap<Integer, ExtensionValue<'a>>);
+
+impl<'a> ExtensionMap<'a> {
+    pub fn insert(&mut self, key: Integer, value: ExtensionValue<'a>) {
+        self.0.insert(key, value);
+    }
+
+    pub fn serialize_map<M, O, E>(&self, map: &mut M, _is_human_readable: bool) -> Result<(), E>
+    where
+        M: ser::SerializeMap<Ok = O, Error = E>,
+    {
+        for (key, value) in self.0.iter() {
+            map.serialize_entry(key, value)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Empty for ExtensionMap<'_> {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// ExtensionMap represents the possible types that can be used in extensions
-#[derive(Debug, Serialize, Deserialize, Ord, PartialOrd, Eq, PartialEq, TryFrom, Clone)]
-#[serde(untagged)]
-pub enum ExtensionMap<'a> {
+#[derive(Debug, Ord, PartialOrd, Eq, PartialEq, TryFrom, Clone)]
+pub enum ExtensionValue<'a> {
     /// No value
     Null,
     /// Boolean values
     Bool(Bool),
+    /// A bstr
+    Bytes(Bytes),
     /// A signed integer
     Int(Int),
     /// A UTF-8 string value
     Text(Text<'a>),
     /// An unsigned integer
     Uint(Uint),
-    /// A bstr
-    Bytes(Bytes),
     /// An array of extension values
-    Array(Vec<ExtensionMap<'a>>),
+    Array(Vec<ExtensionValue<'a>>),
     /// A map of extension key-value pairs
-    Map(BTreeMap<Label<'a>, ExtensionMap<'a>>),
+    Map(BTreeMap<Label<'a>, ExtensionValue<'a>>),
+    /// A value behind a CBOR tag
+    Tag(u64, Box<ExtensionValue<'a>>),
 }
 
-impl Empty for ExtensionMap<'_> {
+impl Empty for ExtensionValue<'_> {
     fn is_empty(&self) -> bool {
         match self {
             Self::Null => true,
@@ -224,11 +314,12 @@ impl Empty for ExtensionMap<'_> {
             Self::Bool(_) => false,
             Self::Array(value) => value.is_empty(),
             Self::Map(value) => value.is_empty(),
+            Self::Tag(_, value) => value.is_empty(),
         }
     }
 }
 
-impl<'a> ExtensionMap<'a> {
+impl<'a> ExtensionValue<'a> {
     pub fn is_empty(&self) -> bool {
         match self {
             Self::Null => true,
@@ -239,6 +330,7 @@ impl<'a> ExtensionMap<'a> {
             Self::Bool(_) => false,
             Self::Array(value) => value.is_empty(),
             Self::Map(value) => value.is_empty(),
+            Self::Tag(_, value) => value.is_empty(),
         }
     }
 
@@ -252,6 +344,7 @@ impl<'a> ExtensionMap<'a> {
             Self::Bool(_) => 1,
             Self::Array(value) => value.len(),
             Self::Map(value) => value.len(),
+            Self::Tag(_, value) => value.len(),
         }
     }
 
@@ -264,6 +357,10 @@ impl<'a> ExtensionMap<'a> {
     pub fn as_bool(&self) -> Option<Bool> {
         match self {
             Self::Bool(b) => Some(*b),
+            Self::Tag(_, boxed) => match boxed.deref() {
+                Self::Bool(b) => Some(*b),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -272,6 +369,10 @@ impl<'a> ExtensionMap<'a> {
     pub fn as_int(&self) -> Option<Int> {
         match self {
             Self::Int(i) => Some(*i),
+            Self::Tag(_, boxed) => match boxed.deref() {
+                Self::Int(i) => Some(*i),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -280,6 +381,10 @@ impl<'a> ExtensionMap<'a> {
     pub fn as_uint(&self) -> Option<Uint> {
         match self {
             Self::Uint(u) => Some(*u),
+            Self::Tag(_, boxed) => match boxed.deref() {
+                Self::Uint(u) => Some(*u),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -288,6 +393,10 @@ impl<'a> ExtensionMap<'a> {
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::Text(t) => Some(t.as_ref()),
+            Self::Tag(_, boxed) => match boxed.deref() {
+                Self::Text(t) => Some(t.as_ref()),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -296,6 +405,10 @@ impl<'a> ExtensionMap<'a> {
     pub fn as_string(&self) -> Option<String> {
         match self {
             Self::Text(text) => Some(text.to_string()),
+            Self::Tag(_, boxed) => match boxed.deref() {
+                Self::Text(text) => Some(text.to_string()),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -304,23 +417,240 @@ impl<'a> ExtensionMap<'a> {
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Self::Bytes(b) => Some(b.as_ref()),
+            Self::Tag(_, boxed) => match boxed.deref() {
+                Self::Bytes(b) => Some(b.as_ref()),
+                _ => None,
+            },
             _ => None,
         }
     }
 
     /// Attempts to extract an `Array` value as a reference to the vector.
-    pub fn as_array(&self) -> Option<&Vec<ExtensionMap<'a>>> {
+    pub fn as_array(&self) -> Option<&Vec<ExtensionValue<'a>>> {
         match self {
             Self::Array(a) => Some(a),
+            Self::Tag(_, boxed) => match boxed.deref() {
+                Self::Array(a) => Some(a),
+                _ => None,
+            },
             _ => None,
         }
     }
 
     /// Attempts to extract a `Map` value as a reference to the map.
-    pub fn as_map(&self) -> Option<&BTreeMap<Label<'a>, ExtensionMap<'a>>> {
+    pub fn as_map(&self) -> Option<&BTreeMap<Label<'a>, ExtensionValue<'a>>> {
         match self {
             Self::Map(m) => Some(m),
+            Self::Tag(_, boxed) => match boxed.deref() {
+                Self::Map(m) => Some(m),
+                _ => None,
+            },
             _ => None,
+        }
+    }
+}
+
+impl TryFrom<serde_json::Value> for ExtensionValue<'_> {
+    type Error = CoreError;
+
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        match value {
+            serde_json::Value::Null => Ok(Self::Null),
+            serde_json::Value::Bool(b) => Ok(Self::Bool(b)),
+            serde_json::Value::Number(n) => {
+                if n.is_u64() {
+                    Ok(Self::Uint(n.as_u64().unwrap().into()))
+                } else if n.is_i64() {
+                    Ok(Self::Int(n.as_i64().unwrap().into()))
+                } else {
+                    Err(CoreError::InvalidValue(
+                        "floating point and BigInt extension values not supported".to_string(),
+                    ))
+                }
+            }
+            serde_json::Value::String(s) => match URL_SAFE_NO_PAD.decode(&s) {
+                Ok(bytes) => Ok(Self::Bytes(bytes.into())),
+                Err(_) => Ok(Self::Text(s.into())),
+            },
+            serde_json::Value::Array(a) => Ok(Self::Array(
+                a.into_iter()
+                    .map(Self::try_from)
+                    .collect::<Result<Vec<ExtensionValue>, CoreError>>()?,
+            )),
+            serde_json::Value::Object(m) => Ok(Self::Map(
+                m.into_iter()
+                    .map(|(k, v)| Ok((Label::parse(k.as_str()), Self::try_from(v)?)))
+                    .collect::<Result<BTreeMap<Label, ExtensionValue>, CoreError>>()?,
+            )),
+        }
+    }
+}
+
+impl From<&ExtensionValue<'_>> for serde_json::Value {
+    fn from(value: &ExtensionValue<'_>) -> Self {
+        match value {
+            ExtensionValue::Null => Self::Null,
+            ExtensionValue::Bool(b) => Self::Bool(*b),
+            // the unwrap()'s below will never panic because arbitrary_precision feature is enabled
+            ExtensionValue::Int(i) => Self::Number(serde_json::Number::from_i128(i.0).unwrap()),
+            ExtensionValue::Uint(u) => Self::Number(serde_json::Number::from_i128(u.0).unwrap()),
+            ExtensionValue::Bytes(b) => Self::String(URL_SAFE_NO_PAD.encode(b)),
+            ExtensionValue::Text(t) => Self::String(t.clone().into()),
+            ExtensionValue::Array(a) => {
+                Self::Array(a.iter().map(serde_json::Value::from).collect())
+            }
+            ExtensionValue::Map(m) => Self::Object(
+                m.iter()
+                    .map(|(k, v)| (k.to_string(), serde_json::Value::from(v)))
+                    .collect(),
+            ),
+            ExtensionValue::Tag(u, boxed) => Self::Object({
+                let mut map = serde_json::Map::new();
+                map.insert(
+                    "tag".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from_i128(*u as i128).unwrap()),
+                );
+                map.insert("value".to_string(), serde_json::Value::from(boxed.deref()));
+                map
+            }),
+        }
+    }
+}
+
+impl TryFrom<ciborium::Value> for ExtensionValue<'_> {
+    type Error = CoreError;
+
+    fn try_from(value: ciborium::Value) -> Result<Self, Self::Error> {
+        match value {
+            ciborium::Value::Null => Ok(Self::Null),
+            ciborium::Value::Bool(b) => Ok(Self::Bool(b)),
+            ciborium::Value::Integer(i) => {
+                let raw: i128 = i128::from(i);
+                if raw >= 0 {
+                    Ok(Self::Uint(raw.into()))
+                } else {
+                    Ok(Self::Int(raw.into()))
+                }
+            }
+            ciborium::Value::Float(_) => Err(CoreError::InvalidValue(
+                "floating point extension values not supported".to_string(),
+            )),
+            ciborium::Value::Text(t) => {
+                let val = Self::Text(t.into());
+                Ok(val)
+            }
+            ciborium::Value::Bytes(b) => Ok(Self::Bytes(b.into())),
+            ciborium::Value::Tag(u, boxed) => Ok(Self::Tag(
+                u,
+                Box::new(Self::try_from(boxed.deref().to_owned())?),
+            )),
+            ciborium::Value::Array(a) => Ok(Self::Array(
+                a.into_iter()
+                    .map(Self::try_from)
+                    .collect::<Result<Vec<ExtensionValue>, CoreError>>()?,
+            )),
+            ciborium::Value::Map(m) => Ok(Self::Map(
+                m.into_iter()
+                    .map(|(k, v)| Ok((Label::try_from(k)?, Self::try_from(v)?)))
+                    .collect::<Result<BTreeMap<Label, ExtensionValue>, CoreError>>()?,
+            )),
+            value => Err(CoreError::InvalidValue(format!(
+                "unexpected value {value:?}"
+            ))),
+        }
+    }
+}
+
+impl From<&ExtensionValue<'_>> for ciborium::Value {
+    fn from(value: &ExtensionValue<'_>) -> Self {
+        match value {
+            ExtensionValue::Null => Self::Null,
+            ExtensionValue::Bool(b) => Self::Bool(*b),
+            ExtensionValue::Int(i) => {
+                Self::Integer(ciborium::value::Integer::try_from(i.0).unwrap())
+            }
+            ExtensionValue::Uint(i) => {
+                Self::Integer(ciborium::value::Integer::try_from(i.0).unwrap())
+            }
+            ExtensionValue::Bytes(b) => Self::Bytes(b.into()),
+            ExtensionValue::Text(t) => Self::Text(t.clone().into()),
+            ExtensionValue::Array(a) => Self::Array(a.iter().map(ciborium::Value::from).collect()),
+            ExtensionValue::Map(m) => Self::Map(
+                m.iter()
+                    .map(|(k, v)| {
+                        (
+                            match k {
+                                Label::Text(t) => ciborium::Value::Text(t.to_string()),
+                                Label::Int(i) => {
+                                    Self::Integer(ciborium::value::Integer::try_from(i.0).unwrap())
+                                }
+                            },
+                            ciborium::Value::from(v),
+                        )
+                    })
+                    .collect(),
+            ),
+            ExtensionValue::Tag(u, boxed) => {
+                Self::Tag(*u, Box::new(ciborium::Value::from(boxed.deref())))
+            }
+        }
+    }
+}
+
+impl Serialize for ExtensionValue<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            serde_json::Value::from(self).serialize(serializer)
+        } else {
+            ciborium::Value::from(self).serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ExtensionValue<'_> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            let value = serde_json::Value::deserialize(deserializer)?;
+            match value {
+                serde_json::Value::String(s) => match URL_SAFE_NO_PAD.decode(&s) {
+                    Ok(bytes) => Ok(Self::Bytes(bytes.into())),
+                    Err(_) => Ok(Self::Text(s.into())),
+                },
+                serde_json::Value::Object(m) => {
+                    if m.contains_key("tag") && m.contains_key("value") && m.len() == 2 {
+                        let tag: u64 = match m.get("tag").unwrap() {
+                            serde_json::Value::Number(n) => match n.as_u64() {
+                                Some(v) => Ok(v),
+                                None => Err(de::Error::custom(format!("invalid tag {n:?}"))),
+                            },
+                            v => Err(de::Error::custom(format!("invalid tag {v:?}"))),
+                        }?;
+
+                        let val: Self = m
+                            .get("value")
+                            .unwrap()
+                            .to_owned()
+                            .try_into()
+                            .map_err(de::Error::custom)?;
+                        Ok(Self::Tag(tag, Box::new(val)))
+                    } else {
+                        serde_json::Value::Object(m)
+                            .try_into()
+                            .map_err(de::Error::custom)
+                    }
+                }
+                v => v.try_into().map_err(de::Error::custom),
+            }
+        } else {
+            ciborium::Value::deserialize(deserializer)?
+                .try_into()
+                .map_err(de::Error::custom)
         }
     }
 }
@@ -591,6 +921,16 @@ impl AsMut<[u8]> for ObjectIdentifier {
     }
 }
 
+impl Display for ObjectIdentifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let obj = oid::ObjectIdentifier::try_from(self.0.as_ref());
+        match obj {
+            Ok(oid) => f.write_str(Into::<String>::into(oid).as_str()),
+            Err(_) => f.write_str("<INVALID OID>"),
+        }
+    }
+}
+
 impl Serialize for ObjectIdentifier {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -811,6 +1151,15 @@ pub enum Label<'a> {
 }
 
 impl Label<'_> {
+    /// Parse the provided string into a Label. If the string can be parsed
+    /// into an integer, then a Label::Int is returned, otherwise a Label::Text.
+    pub fn parse(value: &str) -> Self {
+        match value.parse::<Integer>() {
+            Ok(i) => Self::Int(i),
+            Err(_) => Self::Text(value.to_owned().into()),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match self {
             Label::Text(value) => value.is_empty(),
@@ -843,6 +1192,34 @@ impl Label<'_> {
 impl<'a> From<&'a str> for Label<'a> {
     fn from(value: &'a str) -> Self {
         Self::Text(std::borrow::Cow::Borrowed(value))
+    }
+}
+
+impl TryFrom<ciborium::Value> for Label<'_> {
+    type Error = CoreError;
+
+    fn try_from(value: ciborium::Value) -> Result<Self, Self::Error> {
+        match value {
+            ciborium::Value::Text(s) => Ok(Label::Text(s.into())),
+            ciborium::Value::Integer(i) => Ok(Label::Int(i128::from(i).into())),
+            value => Err(CoreError::InvalidValue(format!(
+                "must be Integer or Text, got {value:?}"
+            ))),
+        }
+    }
+}
+
+impl Display for Label<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let temp: String;
+
+        match self {
+            Label::Text(t) => f.write_str(t),
+            Label::Int(u) => f.write_str({
+                temp = u.to_string();
+                temp.as_str()
+            }),
+        }
     }
 }
 
@@ -2074,10 +2451,7 @@ impl<'de> Deserialize<'de> for MaskedRawValue {
 #[repr(C)]
 /// Container for raw values with optional masking
 pub struct RawValueType {
-    #[serde(rename = "4")]
     pub raw_value: RawValueTypeChoice,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "5")]
     pub raw_value_mask: Option<RawValueMaskType>,
 }
 
@@ -2126,51 +2500,72 @@ impl<'de> Deserialize<'de> for RawValueTypeChoice {
     where
         D: Deserializer<'de>,
     {
-        struct TagVisitor;
-
-        impl<'de> Visitor<'de> for TagVisitor {
-            type Value = RawValueTypeChoice;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter
-                    .write_str("a RawValueTypeChoice variant distinguished by CBOR tag (560, 563)")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: de::SeqAccess<'de>,
-            {
-                let tag: u16 = seq
-                    .next_element()?
-                    .ok_or_else(|| de::Error::custom("missing tag"))?;
-
-                match tag {
-                    560 => {
-                        let value: TaggedBytes = seq
-                            .next_element()?
-                            .ok_or_else(|| de::Error::custom("missing tagged value"))?;
-                        Ok(RawValueTypeChoice::TaggedBytes(value))
-                    }
-                    563 => {
-                        let value: TaggedMaskedRawValue = seq
-                            .next_element()?
-                            .ok_or_else(|| de::Error::custom("missing tagged value"))?;
-                        Ok(RawValueTypeChoice::TaggedMaskedRawValue(value))
-                    }
-                    _ => Err(de::Error::custom(format!("unsupported CBOR tag: {}", tag))),
+        if deserializer.is_human_readable() {
+            let tagged_value = TaggedJsonValue::deserialize(deserializer)?;
+            match tagged_value.typ {
+                "bytes" => {
+                    let bytes: Bytes = serde_json::from_str(tagged_value.value.get())
+                        .map_err(de::Error::custom)?;
+                    Ok(RawValueTypeChoice::TaggedBytes(TaggedBytes::from(bytes)))
                 }
+                "masked-raw-value" => {
+                    let mrv: MaskedRawValue = serde_json::from_str(tagged_value.value.get())
+                        .map_err(de::Error::custom)?;
+                    Ok(RawValueTypeChoice::TaggedMaskedRawValue(
+                        TaggedMaskedRawValue::from(mrv),
+                    ))
+                }
+                s => Err(de::Error::custom(format!(
+                    "unexpected RawValueTypeChoice type \"{s}\""
+                ))),
+            }
+        } else {
+            match ciborium::Value::deserialize(deserializer)? {
+                ciborium::Value::Tag(tag, inner) => {
+                    // Re-serializing the inner Value so that we can deserialize it
+                    // into an appropriate type, once we figure out what that is
+                    // based on the tag.
+                    let mut buf: Vec<u8> = Vec::new();
+                    ciborium::into_writer(&inner, &mut buf).unwrap();
+
+                    match tag {
+                        560 => {
+                            let bytes: Bytes =
+                                ciborium::from_reader(buf.as_slice()).map_err(de::Error::custom)?;
+                            Ok(RawValueTypeChoice::TaggedBytes(TaggedBytes::from(bytes)))
+                        }
+                        563 => {
+                            let mrv: MaskedRawValue =
+                                ciborium::from_reader(buf.as_slice()).map_err(de::Error::custom)?;
+                            Ok(RawValueTypeChoice::TaggedMaskedRawValue(
+                                TaggedMaskedRawValue::from(mrv),
+                            ))
+                        }
+                        n => Err(de::Error::custom(format!(
+                            "unexpected RawValueTypeChoice tag {n}"
+                        ))),
+                    }
+                }
+                _ => Err(de::Error::custom(
+                    "did not see a tag for RawValueTypeChoice",
+                )),
             }
         }
-
-        deserializer.deserialize_any(TagVisitor)
     }
 }
 
+#[derive(Deserialize)]
+pub(crate) struct TaggedJsonValue<'a> {
+    #[serde(rename = "type")]
+    pub typ: &'a str,
+    #[serde(borrow)]
+    pub value: &'a serde_json::value::RawValue,
+}
+
 /// Version scheme enumeration as defined in the specification
-#[repr(C)]
-#[derive(Debug, Serialize, Deserialize, From, TryFrom, PartialEq, Eq, PartialOrd, Ord, Clone)]
-#[serde(untagged)]
-pub enum VersionScheme {
+#[repr(i64)]
+#[derive(Debug, From, TryFrom, PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub enum VersionScheme<'a> {
     /// Multi-part numeric version (e.g., 1.2.3)
     Multipartnumeric = 1,
     /// Multi-part numeric version with suffix (e.g., 1.2.3-beta)
@@ -2181,6 +2576,194 @@ pub enum VersionScheme {
     Decimal = 4,
     /// Semantic versioning (e.g., 1.2.3-beta+build.123)
     Semver = 16384,
+    /// Unregisted schemes for Private Use. Must be either a string or an in in the range
+    /// [-256, -1].
+    PrivateUse(Label<'a>),
+}
+
+impl TryFrom<i64> for VersionScheme<'_> {
+    type Error = CoreError;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Multipartnumeric),
+            2 => Ok(Self::MultipartnumericSuffix),
+            3 => Ok(Self::Alphanumeric),
+            4 => Ok(Self::Decimal),
+            16384 => Ok(Self::Semver),
+            int @ -256..=-1 => Ok(Self::PrivateUse(Label::Int(int.into()))),
+            int => Err(CoreError::InvalidValue(format!(
+                "invalid version scheme {int}"
+            ))),
+        }
+    }
+}
+
+impl TryFrom<&VersionScheme<'_>> for i64 {
+    type Error = CoreError;
+
+    fn try_from(value: &VersionScheme<'_>) -> Result<Self, Self::Error> {
+        match value {
+            VersionScheme::Multipartnumeric => Ok(1),
+            VersionScheme::MultipartnumericSuffix => Ok(2),
+            VersionScheme::Alphanumeric => Ok(3),
+            VersionScheme::Decimal => Ok(4),
+            VersionScheme::Semver => Ok(5),
+            VersionScheme::PrivateUse(label) => match label {
+                Label::Int(int) => (*int).try_into().map_err(|e: crate::error::NumbersError| {
+                    CoreError::InvalidValue(e.to_string())
+                }),
+                Label::Text(text) => Err(CoreError::InvalidValue(format!(
+                    "Private Use version scheme \"{text}\" does not have an integer prepresention"
+                ))),
+            },
+        }
+    }
+}
+
+impl<'a> TryFrom<&'a str> for VersionScheme<'a> {
+    type Error = CoreError;
+
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+        match value {
+            "multipartnumeric" => Ok(Self::Multipartnumeric),
+            "multipartnumeric+suffix" => Ok(Self::MultipartnumericSuffix),
+            "alphanumeric" => Ok(Self::Alphanumeric),
+            "decimal" => Ok(Self::Decimal),
+            "semver" => Ok(Self::Semver),
+            label => match label.parse::<i128>() {
+                int @ Ok(-256..=-1) => Ok(Self::PrivateUse(Label::Int(Integer(int.unwrap())))),
+                Ok(int) => Err(CoreError::InvalidValue(format!(
+                    "invalid version scheme {int}"
+                ))),
+                Err(_) => Ok(Self::PrivateUse(Label::Text(label.into()))),
+            },
+        }
+    }
+}
+
+impl TryFrom<String> for VersionScheme<'_> {
+    type Error = CoreError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        match value.as_str() {
+            "multipartnumeric" => Ok(Self::Multipartnumeric),
+            "multipartnumeric+suffix" => Ok(Self::MultipartnumericSuffix),
+            "alphanumeric" => Ok(Self::Alphanumeric),
+            "decimal" => Ok(Self::Decimal),
+            "semver" => Ok(Self::Semver),
+            label => match label.parse::<i128>() {
+                int @ Ok(-256..=-1) => Ok(Self::PrivateUse(Label::Int(Integer(int.unwrap())))),
+                Ok(int) => Err(CoreError::InvalidValue(format!(
+                    "invalid version scheme {int}"
+                ))),
+                Err(_) => Ok(Self::PrivateUse(Label::Text(label.to_owned().into()))),
+            },
+        }
+    }
+}
+
+impl Display for VersionScheme<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tmp: String;
+
+        let name = match self {
+            Self::Multipartnumeric => "multipartnumeric",
+            Self::MultipartnumericSuffix => "multipartnumeric+suffix",
+            Self::Alphanumeric => "alphanumeric",
+            Self::Decimal => "decimal",
+            Self::Semver => "semver",
+            Self::PrivateUse(label) => match label {
+                Label::Int(int) => {
+                    tmp = int.to_string();
+                    &tmp
+                }
+                Label::Text(text) => text.as_ref(),
+            },
+        };
+
+        f.write_str(name)
+    }
+}
+
+impl Serialize for VersionScheme<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let is_human_readable = serializer.is_human_readable();
+
+        if is_human_readable {
+            self.to_string().serialize(serializer)
+        } else {
+            match i64::try_from(self) {
+                Ok(int) => int.serialize(serializer),
+                Err(_) => self.to_string().serialize(serializer),
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VersionScheme<'_> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct VersionSchemeVisitor<'a> {
+            marker: PhantomData<&'a str>,
+        }
+
+        impl<'a> Visitor<'_> for VersionSchemeVisitor<'a> {
+            type Value = VersionScheme<'a>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("int or string VersionScheme identifier")
+            }
+
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                VersionScheme::try_from(v).map_err(de::Error::custom)
+            }
+
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if v > i64::MAX as u64 {
+                    return Err(de::Error::invalid_value(de::Unexpected::Unsigned(v), &self));
+                }
+
+                self.visit_i64(v as i64)
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                VersionScheme::try_from(v.to_owned()).map_err(de::Error::custom)
+            }
+
+            fn visit_borrowed_str<E>(self, v: &'_ str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(v)
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                VersionScheme::try_from(v).map_err(de::Error::custom)
+            }
+        }
+
+        deserializer.deserialize_any(VersionSchemeVisitor {
+            marker: PhantomData,
+        })
+    }
 }
 
 /// Hashing algorithms listed in the [IANA Named Information Hash Algorithm
@@ -4532,6 +5115,205 @@ mod tests {
                 err.to_string().as_str(),
                 "invalid value: invalid COSE elliptic curve Private Use value 42 (must be < -65536)",
             );
+        }
+    }
+
+    #[test]
+    fn test_version_scheme_serde() {
+        let vs = VersionScheme::Multipartnumeric;
+
+        let mut actual: Vec<u8> = vec![];
+        ciborium::into_writer(&vs, &mut actual).unwrap();
+
+        let expected: Vec<u8> = vec![
+            0x01, // 1 [multipartnumeric]
+        ];
+
+        assert_eq!(actual, expected);
+
+        let vs_de: VersionScheme = ciborium::from_reader(expected.as_slice()).unwrap();
+
+        assert_eq!(vs_de, vs);
+
+        let actual = serde_json::to_string(&vs).unwrap();
+
+        let expected = "\"multipartnumeric\"";
+
+        assert_eq!(actual, expected);
+
+        let vs_de: VersionScheme = serde_json::from_str(expected).unwrap();
+
+        assert_eq!(vs_de, vs);
+
+        let vs = VersionScheme::PrivateUse(Label::Text("foo".into()));
+
+        let mut actual: Vec<u8> = vec![];
+        ciborium::into_writer(&vs, &mut actual).unwrap();
+
+        let expected: Vec<u8> = vec![
+            0x63, // tstr(3),
+              0x66, 0x6f, 0x6f, // "foo"
+        ];
+
+        assert_eq!(actual, expected);
+
+        let vs_de: VersionScheme = ciborium::from_reader(expected.as_slice()).unwrap();
+
+        assert_eq!(vs_de, vs);
+
+        let actual = serde_json::to_string(&vs).unwrap();
+
+        let expected = "\"foo\"";
+
+        assert_eq!(actual, expected);
+
+        let vs_de: VersionScheme = serde_json::from_str(expected).unwrap();
+
+        assert_eq!(vs_de, vs);
+
+        let vs = VersionScheme::PrivateUse(Label::Int(Integer(-1)));
+
+        let mut actual: Vec<u8> = vec![];
+        ciborium::into_writer(&vs, &mut actual).unwrap();
+
+        let expected: Vec<u8> = vec![
+            0x20, // -1
+        ];
+
+        assert_eq!(actual, expected);
+
+        let vs_de: VersionScheme = ciborium::from_reader(expected.as_slice()).unwrap();
+
+        assert_eq!(vs_de, vs);
+
+        let actual = serde_json::to_string(&vs).unwrap();
+
+        let expected = "\"-1\"";
+
+        assert_eq!(actual, expected);
+
+        let vs_de: VersionScheme = serde_json::from_str(expected).unwrap();
+
+        assert_eq!(vs_de, vs);
+
+        let vs_de: VersionScheme = serde_json::from_str("16384").unwrap();
+
+        assert_eq!(vs_de, VersionScheme::Semver);
+
+        let err = serde_json::from_str::<VersionScheme>("42")
+            .err()
+            .unwrap()
+            .to_string();
+
+        assert_eq!(
+            err,
+            "invalid value: invalid version scheme 42 at line 1 column 2"
+        );
+    }
+
+    #[test]
+    fn test_extension_value_serde() {
+        struct TestCase<'a> {
+            extension: ExtensionValue<'a>,
+            expected_json: &'a str,
+            expected_cbor: Vec<u8>,
+        }
+
+        let test_cases: Vec<TestCase> = vec![
+            TestCase {
+                extension: ExtensionValue::Null,
+                expected_json: "null",
+                expected_cbor: vec![ 0xf6 ],
+            },
+            TestCase {
+                extension: ExtensionValue::Uint(Integer(1)),
+                expected_json: "1",
+                expected_cbor: vec![ 0x01 ],
+            },
+            TestCase {
+                extension: ExtensionValue::Int(Integer(-1)),
+                expected_json: "-1",
+                expected_cbor: vec![ 0x20 ],
+            },
+            TestCase {
+                extension: ExtensionValue::Bool(true),
+                expected_json: "true",
+                expected_cbor: vec![ 0xf5 ],
+            },
+            TestCase {
+                extension: ExtensionValue::Bytes(vec![0x1, 0x02, 0x03].into()),
+                expected_json: "\"AQID\"",
+                expected_cbor: vec![
+                    0x43, // bstr(3)
+                      0x01, 0x02, 0x03,
+                ],
+            },
+            TestCase {
+                extension: ExtensionValue::Text("test value".into()),
+                expected_json: "\"test value\"",
+                expected_cbor: vec![
+                    0x6a, // tstr(10)
+                    0x74, 0x65, 0x73, 0x74, 0x20, 0x76, 0x61, 0x6c, // "test val"
+                    0x75, 0x65,                                     // "ue"
+                ],
+            },
+            TestCase {
+                extension: ExtensionValue::Array(vec![
+                    ExtensionValue::Uint(1.into()),
+                    ExtensionValue::Uint(2.into()),
+                    ExtensionValue::Uint(3.into()),
+                ].into()),
+                expected_json: "[1,2,3]",
+                expected_cbor: vec![
+                    0x83, // array(3)
+                      0x01,
+                      0x02,
+                      0x03,
+                ],
+            },
+            TestCase {
+                extension: ExtensionValue::Map(BTreeMap::from([
+                   (Label::Text("foo".into()), ExtensionValue::Uint(1.into())),
+                   (Label::Int(1.into()), ExtensionValue::Uint(2.into())),
+                ])),
+                expected_json: r#"{"1":2,"foo":1}"#,
+                expected_cbor: vec![
+                    0xa2, // map(2)
+                      0x63, // key: tstr(3)
+                        0x66, 0x6f, 0x6f, // "foo"
+                      0x01, // value: 1
+                      0x01, // key: 1
+                      0x02, // value: 2
+                ],
+            },
+            TestCase {
+                extension: ExtensionValue::Tag(1337, Box::new(ExtensionValue::Uint(1.into()))),
+                expected_json: r#"{"tag":1337,"value":1}"#,
+                expected_cbor: vec![
+                    0xd9, 0x05, 0x39, // tag(1337)
+                      0x01,
+                ],
+            },
+        ];
+
+        for tc in test_cases.into_iter() {
+            let mut actual_cbor: Vec<u8> = vec![];
+            ciborium::into_writer(&tc.extension, &mut actual_cbor).unwrap();
+
+            assert_eq!(actual_cbor, tc.expected_cbor);
+
+            let extension_de: ExtensionValue =
+                ciborium::from_reader(actual_cbor.as_slice()).unwrap();
+
+            assert_eq!(extension_de, tc.extension);
+
+            let actual_json = serde_json::to_string(&tc.extension).unwrap();
+
+            assert_eq!(actual_json, tc.expected_json);
+
+            let extension_de: ExtensionValue = serde_json::from_str(actual_json.as_str()).unwrap();
+
+            assert_eq!(extension_de, tc.extension);
         }
     }
 }
